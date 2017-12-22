@@ -1,0 +1,10 @@
+---
+title: "mtcars data analysis"
+output: html_notebook
+---
+
+In this project I want to analyze the mtcars dataset. I am  interested in exploring the relationship between `mpg` (miles per gallon) and other variables. Particularly I want to answer the following questions:
+
+* Is an automatic or manual transmission better for MPG?
+
+* Quantify the MPG difference between automatic and manual transmissions.
