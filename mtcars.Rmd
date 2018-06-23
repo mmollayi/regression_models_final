@@ -1,10 +1,211 @@
 ---
-title: "mtcars data analysis"
-output: html_notebook
+title: "Do manual transmission cars get better gas mileage?"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
 ---
+```{r, echo=FALSE}
+knitr::opts_chunk$set(
+  fig.align = "center" 
+)
+```
 
-In this project I want to analyze the mtcars dataset. I am  interested in exploring the relationship between `mpg` (miles per gallon) and other variables. Particularly I want to answer the following questions:
 
-* Is an automatic or manual transmission better for MPG?
+In the past, it was nearly a given that vehicles with manual transmission had better fuel economy than cars with automatic transmission. In this project I want to see if this is the case for the automobiles in the `mtcars` dataset. This data was extracted from the 1974 Motor Trend US magazine, and comprises fuel consumption and 10 aspects of automobile design and performance for 32 automobiles (1973–74 models). To get more information about the dataset just type `?mtcars` in the R console.
 
-* Quantify the MPG difference between automatic and manual transmissions.
+## Data preparation
+
+Let's get started by loading up required libraries and then do some data cleaning.
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(GGally)
+library(leaps)
+library(ISLR)
+
+data("mtcars")
+head(mtcars)
+```
+To tidy the dataset, we first have to convert the row names to a column. I will also use informative labels to decode the levels in `am` and `vs` columns:
+```{r}
+# vs = 0 means V-engine, and vs = 1 means straight engine
+# am = 0 is automatic and 1 is manual
+mtcars <- mtcars %>%
+    rownames_to_column("car") %>% 
+    mutate(engine = ifelse(vs, "straight", "V"),
+           transmission = ifelse(am, "manual", "automatic")) %>% 
+    select(-am, -vs)
+```
+
+## How is transmission type related to other car specs?
+
+Since we want to assess the effect of a categorical variable `transmission` on a quantitative variable `mpg` we may start with a box plot and see if there are differences between the distribution of `mpg` for the two transmission types:
+```{r, fig.width=4, fig.asp= 0.9, fig.cap="Figure 1: This display suggests manual trasmission cars are superior with respect to fuel economy."}
+mtcars %>%
+    ggplot(aes(factor(transmission), mpg)) +
+    geom_boxplot(aes(fill = transmission)) +
+    geom_point(position = position_dodge(width = 0.75), alpha = 0.5) +
+    labs(
+        x = "Transmission type",
+        y = "Fuel economy (miles/(US) gallon)"
+    ) +
+    theme(legend.position = "non")
+```
+
+The box plot suggests that there is indeed evidence to suspect that automatic transmission cars consume more fuel than manual transmission cars. To explore this further we may look at the relationship between `mpg` and `trasmission` with other variables in the dataset.
+```{r, fig.cap="Figure 2: Most of the variables follow different distributions with respect to transmission type."}
+mtcars %>%
+    select(mpg, disp, hp, drat, wt, qsec, transmission) %>% 
+    gather(key = "column", value = "value", -transmission) %>% 
+    ggplot(aes(transmission, value)) +
+    geom_boxplot(aes(fill = transmission)) +
+    facet_wrap(~column, scales = "free_y", nrow = 2) +
+    xlab("Transmission type") +
+    ylab("") +
+    theme(legend.position = "none")
+```
+
+We observe that `transmission` splits most of the continuous variables into two distinct groups. So we might have confounding variables. Now let's look at the relationship between `mpg` and other variables. I use a pairs plot so that I can also look at all the correlations between continuous variables:
+```{r, fig.asp= 0.8, fig.width=8, fig.cap="Figure 3: There seems to be some candiate variables that can explain the variability in the gas mileages."}
+ggpairs(mtcars, c("mpg", "disp", "hp", "drat", "wt", "qsec"))
+
+```
+
+We can see many linear patterns and strong correlations in the plot above. Especially `mpg` seems correlated with `wt`, `disp`, `hp`, and `drat`. These all suggest that we can use linear regression to assess the effect of transmission type on `mpg` while accounting for other variables.
+
+## Which single variable best explains gas mileages?
+
+First of all notice the curved relationship between `mpg` and other variables in figure 3. We can fix this by employing a clever transformation:
+```{r}
+mtcars <- mtcars %>%
+    mutate(gp100m = 100 / mpg)
+```
+
+Like MPG (miles per gallon), GPM (gallons per mile) is also a measure of fuel economy so we haven't sacrificed interpretability (I have rescaled GPM to gallons per 100 miles to obtain more convenient units). Below we can see how this new variable shows stronger linear relationship with other variables.
+```{r, fig.cap="Figure 4: We can get stronger linear relationships if we use GPM instead of MPG"}
+smooth_with_cor <- function (data, mapping, method = "lm", se = TURE, span = 1, ...) {
+    x <- eval(mapping$x, data)
+    y <- eval(mapping$y, data)
+    cor <- cor(x, y, method = "pearson")
+    ggplot(data = data, mapping) +
+        geom_point(...) +
+        geom_smooth(method = method, span = span, se = se) +
+        geom_label(
+            data = data.frame(
+                x = max(x, na.rm = TRUE),
+                y = max(y, na.rm = TRUE),
+                lab = round(cor, digits = 2)
+            ),
+            mapping = ggplot2::aes(x = x, y = y, label = lab),
+            hjust = 1, vjust = 1,
+            size = 3, fontface = "bold",
+            inherit.aes = FALSE
+        )
+}
+
+ggduo(
+    mtcars,
+    columnsX = c("wt", "hp", "disp", "qsec", "drat"), 
+    columnsY = c("mpg", "gp100m"),
+    types = list(continuous = lift(smooth_with_cor, method = "loess", se = FALSE))
+)
+```
+Correlations and plots of `gp100m` against other variables suggest `wt` as the best single explanatory variable. We can also make a theoretical argument that validates this choice: The fuel consumed is proportional to the work expended in moving the car which in turn is proportional to the car weight.
+
+Armed with this information we now move on to linear modelling.
+
+## Which subset of variables best explains gas mileages?
+
+For starter, lets apply the best subset selection approach to the data. The `regsubsets()` function (part of the leaps library) performs best subset selection by identifying the best model that contains a given number of predictors, where best is quantified using RSS.
+```{r}
+mdl_bestsub <- regsubsets(gp100m ~ . - mpg - car, mtcars)
+summary(mdl_bestsub)$outmat
+```
+
+As we expected, the best single variable linear model includes `wt` as predictor. The best two variable linear model contains `wt` and `hp`. Models beyond two explanatory variables don't do any better: 
+```{r}
+summary(mdl_bestsub)$adj
+summary(mdl_bestsub)$bic
+```
+
+Up until now our best model is `gp100m ~ wt + hp`. Let's check this model out:
+```{r}
+mdl1 <- lm(gp100m ~ wt + hp, mtcars)
+summary(mdl1)
+```
+
+Both terms in `mdl1` are significant. This is what we might have hoped, because it is very intuitive to assume gas mileage of a car is a function of its weight and power.
+
+## Building an even more powerful model
+
+I now want to leverage my knowledge about the data and offer a specially fruitful predictor: Weight-to-power ratio. Power-to-weight ratio is a measurement of actual performance of any engine or power source. The inverse of power-to-weight, weight-to-power ratio (power loading) is a calculation commonly applied to aircraft, cars, and vehicles. In general, the greater the weight-to-power ratio the more fuel-efficient, but the less responsive will the vehicle be. We can check this facts with a pairs plot. We expect to see negative correlation between `wtpr` and `gp100m` and positive correlation between `wtpr` and `qsec`.
+```{r, fig.cap="Figure 5: weight-to-power ratio has moderately strong positive correlation with acceleration."}
+mtcars <- mutate(mtcars, wtpr = wt / hp)
+ggpairs(mtcars, c("gp100m", "wtpr", "wt", "qsec"))
+```
+
+Aside from being interpretable, `wtpr` has the advantage of being almost uncorrelated with `wt` (correlation = -0.116). Now if we use best subset selection we can see another reason why this new predictor is superior to `hp`:
+
+```{r}
+regsubsets(gp100m ~ . - mpg - car, mtcars) %>% 
+    summary() %>% 
+    .$outmat
+```
+
+`wtpr` is added to the models sequence in the second stage and along with `wt`, stays in all higher order models (remember `hp` was removed from the best model after the second stage). Now lets investigate our new model and perform some model diagnostics.
+```{r}
+mdl2 <- lm(gp100m ~ wt + wtpr, mtcars)
+summary(mdl2)
+```
+
+The $adjusted \space R^2$ has increased about 1% compared to `mdl1` and the standard error of the coefficient of `wt` has decreased about 25%.
+```{r, fig.asp=1, fig.cap="Figure 6: Diagnostic plots for mdl2."}
+par(mfrow = c(2, 2))
+plot(mdl2, id.n = 4, labels.id = mtcars$car)
+```
+There seems to be some problems with the fit. It seems that the variance of residuals slightly increases as the fitted values increase. The data point associated with *Merc 240D* has the high leverage of 0.425 but chooses not to exert it, and thus has low influence (it's interesting to know that unlike all other cars in the data *Merc 240D* has a diesel engine). On the contrary the data point associated with *Chrysler Imperial* has modest leverage equal to 0.1840 but the large cook's distance of 0.6809. It is flagged as an outlier in all the four diagnostic plots. Let's refit the last model with this outlier removed:
+```{r}
+mdl3 <- lm(gp100m ~ wt + wtpr, mtcars[-17,])
+summary(mdl3)
+```
+The $adjusted \space R^2$ suddenly jumps up more than 5% compared to `mdl2` and the standard error for all coefficients have decreased. To decide whether to remove *Chrysler Imperial* from the data, I cross checked its specs in the data with reliable information in the web. I've found out that while this automobile has almost the same specs with *Cadillac Fleetwood* and  *Lincoln Continental*, its MPG measurement in the data is much higher. Therefore I decided to keep this observations removed. Now let's check if the problems with the `mdl2` fit have been addressed:
+```{r, fig.asp=1, fig.cap="Figure 7: Diagnostic plots for mdl3."}
+par(mfrow = c(2, 2))
+plot(mdl3, id.n = 4, labels.id = mtcars$car)
+```
+There's not evident increase in residuals variance anymore and no data point has unusually large cook's distance. The normal Q-Q plot is not as straight as it was in `mdl2`, It is thus worth testing residuals for normality. The Shapiro-Wilk test is quick and easy in R. Normality is its null hypothesis.
+```{r}
+shapiro.test(mdl3$residuals)
+```
+The Shapiro-Wilk p-value of 0.5061 fails to reject normality, supporting confidence in our model. 
+
+As a solid proof for the superiority of `mdl3` over the other two models, we could test them on an independent dataset and see which one yields the least prediction error. To do so I use `Auto` dataset from the ISLR package.
+```{r}
+data("Auto")
+head(Auto)
+```
+
+Some variable names and units are inconsistent with those of `mtcars`. Before feeding the `Auto` data to the `predict()` function, we have to fix this.
+```{r}
+auto2 <- Auto %>%
+    select(mpg, wt = weight, hp = horsepower) %>% 
+    mutate(gp100m = 100 / mpg, wt = wt / 1000, wtpr = wt / hp)
+
+mdls <- list(mdl1 = mdl1, mdl2 = mdl2, mdl3 = mdl3)
+preds <- map(mdls, ~predict(.x, newdata = auto2))
+RMSE <- map_dbl(preds, ~(.x - auto2$gp100m)^2 %>% mean() %>% sqrt())
+RMSE
+```
+
+`mdl3` exhibits the lowest prediction error in terms of RMSE and will be our model of choice, so let's interpret it: Linear regression suggests that an increase of 1000 lbs in weight of a car results in an increase of 1.60 gallons of fuel consumed per 100 miles (+/- 0.11) holding weight-to-power ratio constant, and an increase of 1 lb/hp in weight-to-power ratio results in a drop of 0.052 gallons of fuel consumed per 100 miles (+/- 0.013) while holding the weight constant.
+
+## So do manual transmission cars get better gas mileage?
+
+now that we have a model that explains the gas mileages of various cars in the `mtcars` dataset, we come back to the original question that we wanted to answer. We can simply add `transmission` to our best model and see what happens:
+```{r}
+update(mdl3, ~ . + transmission) %>% 
+    summary()
+```
+After accounting for weight and weight-to-power ratio, we see that transmission type is no longer statistically significant. This result contradicts my previous assertion that it's a known fact that automatic transmission cars were less fuel efficient in the past. what could be the source of this discrepancy? It could be the case that our sample is not large enough to detect that difference. Or maybe if we could take into account the extra weight that results from installing automatic transmission systems, we could see the difference. Nevertheless we are pretty confident that based on the set of samples in `mtcars` we can't reject the null hypothesis that transmission type has no effect on the gas mileages of a car.
